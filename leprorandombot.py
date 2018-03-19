@@ -12,6 +12,11 @@ bot = telebot.TeleBot(token)
 server = Flask(__name__)
 
 
+client = MongoClient(os.environ['MONGO_URL'], 63367)
+db = client[os.environ['MONGODB']]
+db.authenticate(os.environ['MONGO_USER'], os.environ['MONGO_PASSWORD'])
+lepers_collection = db['lepers']
+
 @bot.message_handler(commands=['start', 'help'])
 def handle_start_help(message):
     result = "Привет! Я Лепрорандомбот!\r\nЯ поддерживаю следующие команды:"
@@ -25,22 +30,35 @@ def handle_start_help(message):
 
 @bot.message_handler(commands=['randomize'])
 def handle_randomize(message):
+    chat_id = message.chat.id
+    username = message.from_user.username if message.from_user.username else ''
+    bound_to = message.chat.title if message.chat.type == 'group' else username
+    lepers_by_group = {lepers_group['chat_id']: lepers_group for lepers_group in lepers_collection.find({})}
+    if chat_id not in lepers_by_group:
+        new_element = {'chat_id': message.chat.id,
+                       'bound_to': bound_to,
+                       'last_edit_date': datetime.fromtimestamp(message.date),
+                       'last_edited_by': username,
+                       'members': [],
+                       'number': 0}
+        lepers_by_group[chat_id] = new_element
+        lepers_collection.insert_one(new_element)
+
     msg = message.text[len('/randomize'):]
     if msg.startswith('@'):
         if msg.startswith('@LeproRandomBot ') or msg == '@LeproRandomBot':
             msg = msg[len('@LeproRandomBot '):]
         else:
             msg = '0'
-    total = set(get_lepers(message.chat.id))
-    if len(total) == 0:
+    members = lepers_by_group[message.chat.id]['members']
+    if len(members) == 0:
         bot.send_message(message.chat.id, 'Актуальный список пуст. Я не смогу ничего нарандомить.')
         return
     if not msg:
-        with shelve.open('lepers.db') as storage:
-            try:
-                number = int(storage['number'])
-            except KeyError:
-                number = len(total)
+        number = lepers_by_group[message.chat.id]['number']
+        if not number:
+            bot.send_message(message.chat.id, 'Нужно задать количество участников.')
+            return
     else:
         try:
             number = int(msg)
@@ -50,62 +68,99 @@ def handle_randomize(message):
         if not number:
             bot.send_message(message.chat.id, 'Ну нет, так нельзя.')
             return
-        with shelve.open('lepers.db') as storage:
-            storage['number'] = number
-    if len(total) < number:
-        bot.send_message(message.chat.id, 'Позвольте, но я не могу выбрать %s из %s.' % (number, len(total)))
+    new_values = {
+        'last_edit_date': datetime.fromtimestamp(message.date),
+        'last_edited_by': username,
+        'number': number
+    }
+    lepers_collection.update_one({'chat_id': chat_id}, {'$set': new_values}, upsert=False)
+    members = [member for member in members if member]
+    if len(members) < number:
+        bot.send_message(message.chat.id, 'Позвольте, но я не могу выбрать %s из %s.' % (number, len(members)))
         return
-    players = random.sample(total, number)
-    losers = total.difference(players)
+    players = random.sample(members, number)
+    losers = set(members).difference(players)
+    players = [player for player in members if player in players]
     players_enumerated = ['%s. %s' % (i + 1, player) for i, player in enumerate(players)]
-    result = '*Рандом выбрал следующих игроков:*\r\n%s' % '\r\n'.join(players_enumerated)
-    result += '\r\n*Поздравим счастливчиков!*🌟'
+    result = 'Рандом выбрал следующих игроков:\r\n%s' % '\r\n'.join(players_enumerated)
+    result += '\r\nПоздравим счастливчиков!🌟'
     if len(losers) > 0:
+        losers = [player for player in members if player in losers]
         players_enumerated = ['%s. %s' % (i + 1, player) for i, player in enumerate(losers)]
-        result += '\r\n\r\n*Ждут следующего шанса:*\r\n%s' % '\r\n'.join(players_enumerated)
-    bot.send_message(message.chat.id, result, parse_mode='Markdown')
+        result += '\r\n\r\nЖдут следующего шанса:\r\n%s' % '\r\n'.join(players_enumerated)
+    bot.send_message(message.chat.id, result)
 
 
 @bot.message_handler(commands=['setlepers'])
 def handle_set_lepers(message):
-    msg = message.text[len('/setlepers '):]
+    chat_id = message.chat.id
+    username = message.from_user.username if message.from_user.username else ''
+    bound_to = message.chat.title if message.chat.type == 'group' else username
+    lepers_by_group = {lepers_group['chat_id']: lepers_group for lepers_group in lepers_collection.find({})}
+    if chat_id not in lepers_by_group:
+        new_element = {'chat_id': message.chat.id,
+                       'bound_to': bound_to,
+                       'last_edit_date': datetime.fromtimestamp(message.date),
+                       'last_edited_by': username,
+                       'members': [],
+                       'number': 0}
+        lepers_collection.insert_one(new_element)
+
+    msg = message.text[len('/setlepers'):]
+    if msg.startswith('@'):
+        if msg.startswith('@LeproRandomBot ') or msg == '@LeproRandomBot':
+            msg = msg[len('@LeproRandomBot '):]
+        else:
+            bot.send_message(message.chat.id, 'Непонятно. Давайте еще раз.')
+            return
+    else:
+        msg = msg[1:]
     if not msg:
         bot.send_message(message.chat.id, 'Укажите, пожалуйста, хотя бы одного человека.')
         return
     lepers = msg.split(' ')
+    lepers_copy = lepers
+    lepers = []
+    for leper in lepers_copy:
+        if leper not in lepers:
+            lepers.append(leper)
     if len(lepers) > 100:
         bot.send_message(message.chat.id, 'Вас слишком много! Дайте мне поменьше людей, пожалуйста.')
         return
     if max([len(leper) for leper in lepers]) > 32:
         bot.send_message(message.chat.id, 'Кажется, у кого-то слишком длинное имя. Попробуйте еще раз...')
         return
-    set_lepers(message.chat.id, lepers)
+    new_values = {
+        'last_edit_date': datetime.fromtimestamp(message.date),
+        'last_edited_by': username,
+        'members': lepers
+    }
+    lepers_collection.update_one({'chat_id': chat_id}, {'$set': new_values}, upsert=False)
     bot.send_message(message.chat.id, 'Готово! Актуальный список обновлён.')
 
 
 @bot.message_handler(commands=['getlepers'])
 def handle_get_lepers(message):
-    lepers = get_lepers(message.chat.id)
+    lepers_by_group = {lepers_group['chat_id']: lepers_group for lepers_group in lepers_collection.find({})}
+    if message.chat.id not in lepers_by_group:
+        username = message.from_user.username if message.from_user.username else ''
+        bound_to = message.chat.title if message.chat.type == 'group' else username
+        new_element = {'chat_id': message.chat.id,
+                       'bound_to': bound_to,
+                       'last_edit_date': datetime.fromtimestamp(message.date),
+                       'last_edited_by': username,
+                       'members': [],
+                       'number': 0}
+        lepers_by_group[message.chat.id] = new_element
+        lepers_collection.insert_one(new_element)
+    lepers = lepers_by_group[message.chat.id]['members']
     if len(lepers) == 0:
         result = 'В актуальном списке никого нет'
     else:
         players_enumerated = ['%s. %s' % (i + 1, player) for i, player in enumerate(lepers)]
-        result = '*Актуальный список:*\r\n%s' % '\r\n'.join(players_enumerated)
-    bot.send_message(message.chat.id, result, parse_mode='Markdown')
+        result = 'Актуальный список:\r\n%s' % '\r\n'.join(players_enumerated)
+    bot.send_message(message.chat.id, result)
 
-
-def set_lepers(chat_id, lepers):
-    with shelve.open('lepers.db') as storage:
-        storage[str(chat_id)] = set(lepers)
-
-
-def get_lepers(chat_id):
-    with shelve.open('lepers.db') as storage:
-        try:
-            lepers = storage[str(chat_id)]
-            return lepers
-        except KeyError:
-            return []
 
 @server.route('/%s' % token, methods=['POST'])
 def getMessage():
