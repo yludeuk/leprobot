@@ -5,6 +5,7 @@ import telebot
 import shelve
 import random
 from flask import Flask, request
+from pymongo import MongoClient
 
 token = os.environ['TOKEN']
 bot = telebot.TeleBot(token)
