@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 import os
-import sys
+from datetime import datetime
+
 import telebot
-import shelve
 import random
 from flask import Flask, request
 from pymongo import MongoClient
